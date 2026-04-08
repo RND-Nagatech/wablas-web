@@ -8,6 +8,7 @@ const authRoutes = require('./routes/auth');
 const waRoutes = require('./routes/wa');
 const apiRoutes = require('./routes/api');
 const mediaController = require('./controllers/mediaController');
+const authJwt = require('./middleware/authJwt');
 
 const app = express();
 
@@ -25,7 +26,7 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
 // Media is stored in MongoDB GridFS and served via /media/:id
-app.get('/media/:id', mediaController.getMedia);
+app.get('/media/:id', authJwt, mediaController.getMedia);
 
 app.use('/auth', authRoutes);
 app.use('/wa', waRoutes);

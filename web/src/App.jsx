@@ -7,8 +7,10 @@ import {
   authRegister,
   chatHistory,
   listChats,
+  listIds,
   sendMedia,
   sendText,
+  setChatDisplayName,
   uploadMedia,
   waConnect,
   waDisconnect,
@@ -55,7 +57,17 @@ export default function App() {
   const [chats, setChats] = useState([]);
   const [selectedChat, setSelectedChat] = useState('');
   const [messages, setMessages] = useState([]);
+  const [mediaFetchError, setMediaFetchError] = useState({}); // { [messageId]: string }
+  const [mediaLoading, setMediaLoading] = useState({}); // { [messageId]: boolean }
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewUrl, setPreviewUrl] = useState('');
+  const [previewContentType, setPreviewContentType] = useState('');
+  const [previewTitle, setPreviewTitle] = useState('');
   const [theme, setTheme] = useState('light');
+  const [copyNotice, setCopyNotice] = useState('');
+  const [editingChatId, setEditingChatId] = useState('');
+  const [editingName, setEditingName] = useState('');
+  const [isSavingName, setIsSavingName] = useState(false);
   const [showAccountMenu, setShowAccountMenu] = useState(false);
   const accountRef = useRef(null);
   const [activeTab, setActiveTab] = useState('overview');
@@ -254,7 +266,7 @@ export default function App() {
   }, [activeTab, isAuthed, isConnecting, qr, qrAgeSeconds, statusAgeSeconds, waInfo?.waStatus]);
 
   useEffect(() => {
-    if (!apiKey || activeTab !== 'history') return;
+    if (!apiKey || !['history', 'list_ids', 'overview'].includes(activeTab)) return;
 
     let disposed = false;
     let controller = null;
@@ -264,7 +276,8 @@ export default function App() {
       if (controller) controller.abort();
       controller = new AbortController();
       try {
-        const res = await listChats(apiKey, controller.signal);
+        const res =
+          activeTab === 'list_ids' ? await listIds(apiKey, controller.signal) : await listChats(apiKey, controller.signal);
         if (!res?.success || disposed) return;
         const next = res.data || [];
         setChats((prev) => {
@@ -527,6 +540,166 @@ export default function App() {
   const handleExitHistoryChat = () => {
     setSelectedChat('');
     setMessages([]);
+    setMediaFetchError({});
+    setMediaLoading({});
+  };
+
+  const selectedChatInfo = useMemo(() => {
+    if (!selectedChat) return null;
+    return chats.find((c) => c.waChatId === selectedChat) || null;
+  }, [selectedChat, chats]);
+
+  const displayLabelForChat = (chat) => {
+    if (!chat) return '';
+    const label = chat.displayName || chat.name || '';
+    return label.trim();
+  };
+
+  const formatChatTitle = (chat) => {
+    if (!chat) return '';
+    return displayLabelForChat(chat) || chat.waChatId;
+  };
+
+  const copyToClipboard = async (value) => {
+    try {
+      await navigator.clipboard.writeText(String(value || ''));
+      setCopyNotice('Copied');
+      setTimeout(() => setCopyNotice(''), 1200);
+    } catch {
+      setCopyNotice('Copy failed');
+      setTimeout(() => setCopyNotice(''), 1200);
+    }
+  };
+
+  const beginEditChatName = (chat) => {
+    setEditingChatId(chat.waChatId);
+    setEditingName((chat.displayName || '').trim());
+  };
+
+  const cancelEditChatName = () => {
+    if (isSavingName) return;
+    setEditingChatId('');
+    setEditingName('');
+  };
+
+  const saveEditChatName = async (waChatId) => {
+    if (!apiKey) return;
+    setIsSavingName(true);
+    try {
+      const res = await setChatDisplayName(apiKey, waChatId, editingName);
+      if (!res?.success) {
+        setCopyNotice(res?.message || 'Gagal simpan nama');
+        setTimeout(() => setCopyNotice(''), 1500);
+        return;
+      }
+      const updated = res.data;
+      setChats((prev) =>
+        prev.map((c) => (c.waChatId === waChatId ? { ...c, displayName: updated?.displayName || null } : c))
+      );
+      setEditingChatId('');
+      setEditingName('');
+      setCopyNotice('Saved');
+      setTimeout(() => setCopyNotice(''), 1200);
+    } catch {
+      setCopyNotice('Gagal simpan nama');
+      setTimeout(() => setCopyNotice(''), 1500);
+    } finally {
+      setIsSavingName(false);
+    }
+  };
+
+  const closePreview = () => {
+    setPreviewOpen(false);
+    setPreviewTitle('');
+    setPreviewContentType('');
+    if (previewUrl) {
+      try {
+        URL.revokeObjectURL(previewUrl);
+      } catch {}
+    }
+    setPreviewUrl('');
+  };
+
+  const getMediaIdFromUrl = (url) => {
+    const s = String(url || '');
+    const idx = s.lastIndexOf('/media/');
+    if (idx === -1) return null;
+    const tail = s.slice(idx + '/media/'.length);
+    const id = tail.split(/[?#/]/)[0];
+    return id || null;
+  };
+
+  const fetchMediaBlob = async (mediaId) => {
+    const res = await fetch(`${apiUrl}/media/${encodeURIComponent(mediaId)}`, {
+      headers: { Authorization: `Bearer ${accessToken}` }
+    });
+    if (!res.ok) {
+      const msg = res.status === 401 ? 'Unauthorized' : res.status === 403 ? 'Forbidden' : 'Not found';
+      throw new Error(msg);
+    }
+    const contentType = res.headers.get('content-type') || '';
+    const blob = await res.blob();
+    return { blob, contentType };
+  };
+
+  const previewMedia = async (msg) => {
+    setMediaFetchError((prev) => ({ ...prev, [msg._id]: '' }));
+    if (mediaLoading[msg._id]) return;
+    const mediaId = getMediaIdFromUrl(msg?.media?.url);
+    if (!mediaId) {
+      setMediaFetchError((prev) => ({ ...prev, [msg._id]: 'Media id tidak valid' }));
+      return;
+    }
+    try {
+      setMediaLoading((prev) => ({ ...prev, [msg._id]: true }));
+      // Show an in-app preview modal first; only render media when blob is ready.
+      setPreviewOpen(true);
+      setPreviewTitle(`Media ${msg.media?.type || ''}`.trim());
+      setPreviewContentType('');
+      if (previewUrl) {
+        try {
+          URL.revokeObjectURL(previewUrl);
+        } catch {}
+        setPreviewUrl('');
+      }
+
+      const { blob, contentType } = await fetchMediaBlob(mediaId);
+      const objectUrl = URL.createObjectURL(blob);
+      setPreviewUrl(objectUrl);
+      setPreviewContentType(contentType || '');
+    } catch (err) {
+      setMediaFetchError((prev) => ({ ...prev, [msg._id]: err?.message || 'Gagal ambil media' }));
+      setPreviewOpen(true);
+    } finally {
+      setMediaLoading((prev) => ({ ...prev, [msg._id]: false }));
+    }
+  };
+
+  const downloadMedia = async (msg) => {
+    setMediaFetchError((prev) => ({ ...prev, [msg._id]: '' }));
+    if (mediaLoading[msg._id]) return;
+    const mediaId = getMediaIdFromUrl(msg?.media?.url);
+    if (!mediaId) {
+      setMediaFetchError((prev) => ({ ...prev, [msg._id]: 'Media id tidak valid' }));
+      return;
+    }
+    try {
+      setMediaLoading((prev) => ({ ...prev, [msg._id]: true }));
+      const { blob, contentType } = await fetchMediaBlob(mediaId);
+      const objectUrl = URL.createObjectURL(blob);
+      const ext = contentType.includes('video') ? 'mp4' : contentType.includes('image') ? 'jpg' : 'bin';
+      const a = document.createElement('a');
+      a.href = objectUrl;
+      a.download = `media-${mediaId}.${ext}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+    } catch (err) {
+      setMediaFetchError((prev) => ({ ...prev, [msg._id]: err?.message || 'Gagal download media' }));
+    } finally {
+      setMediaLoading((prev) => ({ ...prev, [msg._id]: false }));
+    }
   };
 
   const formatTimeHHmm = (isoOrDate) => {
@@ -621,6 +794,12 @@ export default function App() {
             History
           </button>
           <button
+            className={`nav-item ${activeTab === 'list_ids' ? 'active' : ''}`}
+            onClick={() => setActiveTab('list_ids')}
+          >
+            List Nomor &amp; ID
+          </button>
+          <button
             className={`nav-item ${activeTab === 'settings' ? 'active' : ''}`}
             onClick={() => setActiveTab('settings')}
           >
@@ -638,6 +817,50 @@ export default function App() {
       </aside>
 
       <div className="content">
+        {copyNotice ? <div className="toast">{copyNotice}</div> : null}
+        {previewOpen && (
+          <div className="modal-backdrop" role="dialog" aria-modal="true">
+            <div className="modal">
+              <div className="modal-header">
+                <p className="modal-title">{previewTitle || 'Preview Media'}</p>
+                <button className="modal-x" onClick={closePreview} type="button" aria-label="Close">
+                  ×
+                </button>
+              </div>
+              <div className="modal-body">
+                {!previewUrl ? (
+                  <div className="preview-loading">
+                    <span className="spinner" />
+                    <span className="muted text-sm">Loading media…</span>
+                  </div>
+                ) : previewContentType.startsWith('image/') ? (
+                  <img className="preview-media" src={previewUrl} alt="Preview" />
+                ) : previewContentType.startsWith('video/') ? (
+                  <video className="preview-media" src={previewUrl} controls />
+                ) : (
+                  <div className="muted text-sm">Format media tidak didukung untuk preview. Silakan download.</div>
+                )}
+              </div>
+              <div className="modal-actions">
+                <button className="px-4 py-2 rounded-xl btn-outline" onClick={closePreview} type="button">
+                  Close
+                </button>
+                {previewUrl ? (
+                  <button
+                    className="px-4 py-2 rounded-xl btn-primary font-semibold"
+                    type="button"
+                    onClick={() => {
+                      // Only open when we already have content, so no blank tabs.
+                      window.open(previewUrl, '_blank', 'noopener,noreferrer');
+                    }}
+                  >
+                    Open New Tab
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          </div>
+        )}
         {confirmOpen && (
           <div className="modal-backdrop" role="dialog" aria-modal="true">
             <div className="modal">
@@ -869,7 +1092,15 @@ export default function App() {
                               background: selectedChat === chat.waChatId ? 'var(--accent-soft)' : 'transparent'
                             }}
                           >
-                            <p className="text-sm">{chat.waChatId}</p>
+                            <div className="history-item-top">
+                              <p className="text-sm font-semibold truncate">
+                                {displayLabelForChat(chat) || chat.waChatId}
+                              </p>
+                              <span className="history-pill">
+                                {chat.isGroup ? 'Group' : 'Contact'}
+                              </span>
+                            </div>
+                            <p className="text-xs muted truncate">{chat.waChatId}</p>
                             <p className="text-xs muted truncate">{chat.lastMessage || '-'}</p>
                           </button>
                         ))}
@@ -885,7 +1116,9 @@ export default function App() {
                     <div className="history-panel-title">
                       <p className="text-sm font-semibold">Messages</p>
                       <p className="text-xs muted">
-                        {selectedChat ? selectedChat : 'Pilih chat untuk melihat pesan'}
+                        {selectedChat
+                          ? `${selectedChat}${displayLabelForChat(selectedChatInfo) ? ` (${displayLabelForChat(selectedChatInfo)})` : ''}`
+                          : 'Pilih chat untuk melihat pesan'}
                       </p>
                     </div>
                     {selectedChat && (
@@ -918,9 +1151,42 @@ export default function App() {
                             >
                               <p className="text-sm msg-text">{msg.text || '-'}</p>
                               {msg.media?.url && (
-                                <a className="text-xs msg-link" href={msg.media.url} target="_blank" rel="noreferrer">
-                                  {msg.media.url}
-                                </a>
+                                <div className="msg-media">
+                                  <div className="msg-media-row">
+                                    <span className="msg-media-label text-xs muted">
+                                      {msg.media?.type ? `Media: ${msg.media.type}` : 'Media'}
+                                    </span>
+                                    <div className="msg-media-actions">
+                                      <button
+                                        type="button"
+                                        className="msg-media-btn btn-soft"
+                                        onClick={() => previewMedia(msg)}
+                                        disabled={!!mediaLoading[msg._id]}
+                                      >
+                                        {mediaLoading[msg._id] ? (
+                                          <span className="btn-inline">
+                                            <span className="spinner" /> Loading…
+                                          </span>
+                                        ) : (
+                                          'Preview'
+                                        )}
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className="msg-media-btn btn-outline"
+                                        onClick={() => downloadMedia(msg)}
+                                        disabled={!!mediaLoading[msg._id]}
+                                      >
+                                        Download
+                                      </button>
+                                    </div>
+                                  </div>
+                                  {mediaFetchError[msg._id] ? (
+                                    <div className="text-xs muted msg-media-error">
+                                      Error: {mediaFetchError[msg._id]}
+                                    </div>
+                                  ) : null}
+                                </div>
                               )}
                               <div className="msg-meta">
                                 <span>{formatTimeHHmm(msg.createdAt)}</span>
@@ -934,6 +1200,88 @@ export default function App() {
                   </div>
                 </div>
               </div>
+            </div>
+          </section>
+        )}
+
+        {activeTab === 'list_ids' && (
+          <section className="grid-two">
+            <div className="card p-6 space-y-4">
+              <h2 className="text-xl font-semibold">List Nomor &amp; ID</h2>
+              <p className="muted text-sm">
+                Ini adalah daftar chat ID yang bisa kamu pakai untuk kirim pesan. Nama contact memakai nama profil WhatsApp (jika ada),
+                dan nama grup memakai subject grup.
+              </p>
+              {chats.length === 0 ? (
+                <div className="history-empty muted text-sm">Belum ada chat.</div>
+              ) : (
+                <div className="space-y-2">
+                  {chats.map((chat) => (
+                    <div key={chat.waChatId} className="list-row">
+                      <div className="list-row-main">
+                        <div className="list-row-top">
+                          <p className="text-sm font-semibold truncate">
+                            {displayLabelForChat(chat) || '-'}
+                          </p>
+                          <span className="history-pill">{chat.isGroup ? 'Group' : 'Contact'}</span>
+                        </div>
+                        <p className="text-xs muted truncate">{chat.waChatId}</p>
+                      </div>
+                      <div className="list-actions">
+                        <button
+                          type="button"
+                          className="px-3 py-2 rounded-xl btn-outline list-copy"
+                          onClick={() => copyToClipboard(chat.waChatId)}
+                        >
+                          Copy ID
+                        </button>
+                        {editingChatId === chat.waChatId ? (
+                          <div className="list-edit">
+                            <input
+                              className="rounded-xl border px-3 py-2 list-edit-input"
+                              style={{ borderColor: 'var(--border)', background: 'var(--surface-elevated)' }}
+                              value={editingName}
+                              onChange={(e) => setEditingName(e.target.value)}
+                              placeholder="Nama (override)"
+                              disabled={isSavingName}
+                            />
+                            <button
+                              type="button"
+                              className="px-3 py-2 rounded-xl btn-primary font-semibold"
+                              onClick={() => saveEditChatName(chat.waChatId)}
+                              disabled={isSavingName}
+                            >
+                              {isSavingName ? (
+                                <span className="btn-inline">
+                                  <span className="spinner" /> Saving…
+                                </span>
+                              ) : (
+                                'Save'
+                              )}
+                            </button>
+                            <button
+                              type="button"
+                              className="px-3 py-2 rounded-xl btn-outline"
+                              onClick={cancelEditChatName}
+                              disabled={isSavingName}
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            className="px-3 py-2 rounded-xl btn-outline"
+                            onClick={() => beginEditChatName(chat)}
+                          >
+                            Edit Nama
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </section>
         )}

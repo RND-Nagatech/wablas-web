@@ -3,6 +3,7 @@ const axios = require('axios');
 const mime = require('mime-types');
 const mongoose = require('mongoose');
 const Message = require('../models/Message');
+const Chat = require('../models/Chat');
 const WhatsAppManager = require('../services/whatsappManager');
 const { getBucket } = require('../services/gridfs');
 
@@ -119,6 +120,19 @@ exports.sendText = async (req, res) => {
       { upsert: true }
     ).catch(() => {});
 
+    await Chat.updateOne(
+      { userId: req.apiUser._id, waChatId: jid },
+      {
+        $set: {
+          isGroup: jid.endsWith('@g.us'),
+          lastMessage: text || null,
+          lastAt: timestamp ? new Date(timestamp * 1000) : new Date()
+        },
+        $setOnInsert: { userId: req.apiUser._id, waChatId: jid }
+      },
+      { upsert: true }
+    ).catch(() => {});
+
     return res.json({
       success: true,
       data: {
@@ -189,6 +203,19 @@ exports.sendMedia = async (req, res) => {
       { upsert: true }
     ).catch(() => {});
 
+    await Chat.updateOne(
+      { userId: req.apiUser._id, waChatId: jid },
+      {
+        $set: {
+          isGroup: jid.endsWith('@g.us'),
+          lastMessage: text || null,
+          lastAt: timestamp ? new Date(timestamp * 1000) : new Date()
+        },
+        $setOnInsert: { userId: req.apiUser._id, waChatId: jid }
+      },
+      { upsert: true }
+    ).catch(() => {});
+
     return res.json({
       success: true,
       data: {
@@ -209,26 +236,100 @@ exports.sendMedia = async (req, res) => {
 };
 
 exports.listChats = async (req, res) => {
-  const chats = await Message.aggregate([
-    { $match: { userId: req.apiUser._id } },
-    { $sort: { createdAt: -1 } },
-    {
-      $group: {
-        _id: '$waChatId',
-        lastMessage: { $first: '$text' },
-        lastAt: { $first: '$createdAt' }
-      }
-    },
-    { $sort: { lastAt: -1 } }
-  ]);
+  const userId = new mongoose.Types.ObjectId(req.apiUser._id);
 
-  const data = chats.map((c) => ({
-    waChatId: c._id,
-    lastMessage: c.lastMessage,
-    lastAt: c.lastAt
+  // Prefer cached chat list (contains name + isGroup), but backfill from messages if needed.
+  let rows = await Chat.find({ userId }).sort({ lastAt: -1, updatedAt: -1 }).lean();
+
+  if (!rows.length) {
+    const chats = await Message.aggregate([
+      { $match: { userId } },
+      { $sort: { createdAt: -1 } },
+      {
+        $group: {
+          _id: '$waChatId',
+          lastMessage: { $first: '$text' },
+          lastAt: { $first: '$createdAt' }
+        }
+      },
+      { $sort: { lastAt: -1 } }
+    ]);
+
+    await Promise.all(
+      chats.map((c) =>
+        Chat.updateOne(
+          { userId, waChatId: c._id },
+          {
+            $set: {
+              isGroup: String(c._id || '').endsWith('@g.us'),
+              lastMessage: c.lastMessage || null,
+              lastAt: c.lastAt || null
+            },
+            $setOnInsert: { userId, waChatId: c._id }
+          },
+          { upsert: true }
+        ).catch(() => {})
+      )
+    );
+
+    rows = await Chat.find({ userId }).sort({ lastAt: -1, updatedAt: -1 }).lean();
+  }
+
+  const data = rows.map((c) => ({
+    waChatId: c.waChatId,
+    name: c.name || null,
+    displayName: c.displayName || null,
+    isGroup: !!c.isGroup,
+    lastMessage: c.lastMessage || null,
+    lastAt: c.lastAt || null
   }));
 
   return res.json({ success: true, data });
+};
+
+exports.listChatIds = async (req, res) => {
+  const userId = new mongoose.Types.ObjectId(req.apiUser._id);
+  const rows = await Chat.find({ userId }).sort({ updatedAt: -1 }).lean();
+  const data = rows.map((c) => ({
+    waChatId: c.waChatId,
+    name: c.name || null,
+    displayName: c.displayName || null,
+    isGroup: !!c.isGroup
+  }));
+  return res.json({ success: true, data });
+};
+
+exports.setChatDisplayName = async (req, res) => {
+  try {
+    const waChatId = decodeURIComponent(String(req.params.waChatId || '').trim());
+    const displayNameRaw = req.body?.displayName;
+
+    if (!waChatId) {
+      return res.status(400).json({ success: false, message: 'waChatId wajib diisi' });
+    }
+    if (typeof displayNameRaw !== 'string') {
+      return res.status(400).json({ success: false, message: 'displayName wajib string' });
+    }
+
+    const displayName = displayNameRaw.trim();
+    if (displayName.length > 80) {
+      return res.status(400).json({ success: false, message: 'displayName terlalu panjang (maks 80)' });
+    }
+
+    await Chat.updateOne(
+      { userId: req.apiUser._id, waChatId },
+      {
+        $set: { displayName: displayName ? displayName : null },
+        $setOnInsert: { userId: req.apiUser._id, waChatId, isGroup: waChatId.endsWith('@g.us') }
+      },
+      { upsert: true }
+    );
+
+    const updated = await Chat.findOne({ userId: req.apiUser._id, waChatId }).lean();
+    return res.json({ success: true, data: updated });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Gagal update displayName' });
+  }
 };
 
 exports.chatHistory = async (req, res) => {

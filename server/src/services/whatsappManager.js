@@ -15,11 +15,31 @@ const path = require('path');
 const fs = require('fs');
 const User = require('../models/User');
 const Message = require('../models/Message');
+const Chat = require('../models/Chat');
 const { useMongoAuthState } = require('./mongoAuthState');
 
 class WhatsAppManager {
   constructor() {
     this.sessions = new Map();
+  }
+
+  hasDisplayNameOverride(displayName) {
+    const v = typeof displayName === 'string' ? displayName.trim() : displayName;
+    return !!v;
+  }
+
+  async setChatNameIfNoOverride(userId, waChatId, patch) {
+    // Only set name if user has not set displayName override.
+    const id = String(userId);
+    await Chat.updateOne(
+      {
+        userId: id,
+        waChatId,
+        $or: [{ displayName: { $exists: false } }, { displayName: null }, { displayName: '' }]
+      },
+      { $set: patch, $setOnInsert: { userId: id, waChatId } },
+      { upsert: true }
+    ).catch(() => {});
   }
 
   pickBestUserJid(msg) {
@@ -125,6 +145,7 @@ class WhatsAppManager {
     await this.resetAuthState(id);
     // Option A: reset WA session also clears message history for this user
     await Message.deleteMany({ userId: id });
+    await Chat.deleteMany({ userId: id });
     await User.findByIdAndUpdate(id, {
       waStatus: 'disconnected',
       waLastError: null,
@@ -190,7 +211,9 @@ class WhatsAppManager {
       manualDisconnect: false,
       qrCreatedAt: null,
       nextReconnectAt: 0,
-      autoRefreshTimer: null
+      autoRefreshTimer: null,
+      groupMetaPending: new Set(),
+      groupSyncInProgress: false
     };
 
     await User.findByIdAndUpdate(id, {
@@ -286,6 +309,12 @@ class WhatsAppManager {
           waAuthPath: null,
           connectedAt: new Date()
         });
+
+        // Background: sync group subjects so group names show up without waiting for new messages.
+        // This should never block the connect flow.
+        setTimeout(() => {
+          void this.syncAllGroups(sock, session, id);
+        }, 250);
       }
 
       if (connection === 'close') {
@@ -348,10 +377,13 @@ class WhatsAppManager {
       for (const msg of messages) {
         if (!msg.message) continue;
         const waChatId = this.normalizeChatId(msg);
+        if (!waChatId) continue;
         const waMessageId = msg.key?.id || null;
         const waFromMe = !!msg.key?.fromMe;
         const timestamp = msg.messageTimestamp ? Number(msg.messageTimestamp) : null;
         const text = this.extractText(msg.message);
+        const isGroup = waChatId.endsWith('@g.us');
+        const pushName = typeof msg.pushName === 'string' ? msg.pushName.trim() : '';
 
         // Upsert to avoid duplicates (API send + upsert event)
         const filter = waMessageId ? { userId: id, waMessageId } : { userId: id, waChatId, timestamp, text };
@@ -375,6 +407,52 @@ class WhatsAppManager {
         ).catch(() => {
           // ignore duplicate-key races
         });
+
+        // Maintain a chat list for History/List pages.
+        const lastAt = timestamp ? new Date(timestamp * 1000) : new Date();
+        const chatUpdate = {
+          isGroup,
+          lastMessage: text || null,
+          lastAt
+        };
+        // Best-effort naming:
+        // - For contacts: use pushName (WhatsApp profile name), not phone address book name.
+        await Chat.updateOne(
+          { userId: id, waChatId },
+          { $set: chatUpdate, $setOnInsert: { userId: id, waChatId } },
+          { upsert: true }
+        ).catch(() => {});
+
+        if (!isGroup && pushName && !waFromMe) {
+          await this.setChatNameIfNoOverride(id, waChatId, { name: pushName, isGroup: false });
+        }
+
+        if (isGroup) {
+          void this.ensureGroupName(sock, session, id, waChatId);
+        }
+      }
+    });
+
+    // Update contact names when Baileys provides them
+    sock.ev.on('contacts.upsert', async (contacts) => {
+      const list = Array.isArray(contacts) ? contacts : [];
+      for (const c of list) {
+        const jid = c?.id;
+        if (!jid || typeof jid !== 'string') continue;
+        if (!jid.endsWith('@s.whatsapp.net')) continue;
+        const name = String(c?.name || c?.notify || c?.verifiedName || '').trim();
+        if (!name) continue;
+        await this.setChatNameIfNoOverride(id, jid, { name, isGroup: false });
+      }
+    });
+
+    sock.ev.on('groups.update', async (updates) => {
+      const list = Array.isArray(updates) ? updates : [];
+      for (const u of list) {
+        const jid = u?.id;
+        const subject = typeof u?.subject === 'string' ? u.subject.trim() : '';
+        if (!jid || !subject) continue;
+        await this.setChatNameIfNoOverride(id, jid, { name: subject, isGroup: true });
       }
     });
 
@@ -388,6 +466,48 @@ class WhatsAppManager {
     if (message.imageMessage?.caption) return message.imageMessage.caption;
     if (message.videoMessage?.caption) return message.videoMessage.caption;
     return null;
+  }
+
+  async ensureGroupName(sock, session, userId, waChatId) {
+    try {
+      if (!waChatId || !waChatId.endsWith('@g.us')) return;
+      // Avoid repeated metadata queries for the same group while connected.
+      if (session?.groupMetaPending?.has(waChatId)) return;
+      session?.groupMetaPending?.add(waChatId);
+
+      const meta = await sock.groupMetadata(waChatId);
+      const subject = typeof meta?.subject === 'string' ? meta.subject.trim() : '';
+      if (subject) {
+        await this.setChatNameIfNoOverride(String(userId), waChatId, { name: subject, isGroup: true });
+      }
+    } catch {
+      // ignore
+    } finally {
+      try {
+        session?.groupMetaPending?.delete(waChatId);
+      } catch {}
+    }
+  }
+
+  async syncAllGroups(sock, session, userId) {
+    try {
+      if (session?.groupSyncInProgress) return;
+      session.groupSyncInProgress = true;
+      if (typeof sock?.groupFetchAllParticipating !== 'function') return;
+      const groups = await sock.groupFetchAllParticipating();
+      const entries = Object.entries(groups || {});
+      for (const [jid, meta] of entries) {
+        const subject = typeof meta?.subject === 'string' ? meta.subject.trim() : '';
+        if (!jid || !subject) continue;
+        await this.setChatNameIfNoOverride(String(userId), jid, { name: subject, isGroup: true });
+      }
+    } catch {
+      // ignore
+    } finally {
+      try {
+        session.groupSyncInProgress = false;
+      } catch {}
+    }
   }
 
   async disconnect(userId) {

@@ -14,6 +14,8 @@ router.post('/send-text', api.sendText);
 router.post('/send-media', api.sendMedia);
 router.get('/history/chats', api.listChats);
 router.get('/history/chats/:waChatId', api.chatHistory);
+router.get('/list-ids', api.listChatIds);
+router.put('/chats/:waChatId/display-name', api.setChatDisplayName);
 router.post('/upload', upload.single('file'), api.upload);
 
 module.exports = router;

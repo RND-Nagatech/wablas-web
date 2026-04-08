@@ -112,6 +112,14 @@ export const listChats = async (apiKey, signal) => {
   return res.json();
 };
 
+export const listIds = async (apiKey, signal) => {
+  const res = await fetch(`${API_URL}/api/list-ids`, {
+    headers: { 'X-API-KEY': apiKey },
+    signal
+  });
+  return res.json();
+};
+
 export const chatHistory = async (apiKey, waChatId, signal) => {
   const res = await fetch(`${API_URL}/api/history/chats/${encodeURIComponent(waChatId)}`, {
     headers: { 'X-API-KEY': apiKey },
@@ -127,6 +135,18 @@ export const uploadMedia = async (apiKey, file) => {
     method: 'POST',
     headers: { 'X-API-KEY': apiKey },
     body: form
+  });
+  return res.json();
+};
+
+export const setChatDisplayName = async (apiKey, waChatId, displayName) => {
+  const res = await fetch(`${API_URL}/api/chats/${encodeURIComponent(waChatId)}/display-name`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-API-KEY': apiKey
+    },
+    body: JSON.stringify({ displayName })
   });
   return res.json();
 };
