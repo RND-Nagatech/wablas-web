@@ -1217,6 +1217,7 @@ export default function App() {
               ) : (
                 <div className="space-y-2">
                   {chats.map((chat) => (
+                    (String(chat?.waChatId || '').endsWith('@lid') ? null : (
                     <div key={chat.waChatId} className="list-row">
                       <div className="list-row-main">
                         <div className="list-row-top">
@@ -1279,6 +1280,7 @@ export default function App() {
                         )}
                       </div>
                     </div>
+                    ))
                   ))}
                 </div>
               )}
@@ -1303,20 +1305,24 @@ export default function App() {
                 {waInfo.waPhone && <span className="muted">{waInfo.waPhone}</span>}
               </div>
               <div className="flex gap-3">
-                <button
-                  onClick={handleConnect}
-                  className="px-4 py-2 rounded-xl btn-primary font-semibold"
-                  disabled={!isAuthed || isConnecting}
-                >
-                  {isConnecting ? 'Connecting...' : 'Connect'}
-                </button>
-                <button
-                  onClick={handleRefreshQr}
-                  className="px-4 py-2 rounded-xl btn-outline"
-                  disabled={!isAuthed || isConnecting}
-                >
-                  {isConnecting ? 'Refreshing...' : 'Refresh QR'}
-                </button>
+                {waInfo.waStatus !== 'connected' ? (
+                  <>
+                    <button
+                      onClick={handleConnect}
+                      className="px-4 py-2 rounded-xl btn-primary font-semibold"
+                      disabled={!isAuthed || isConnecting}
+                    >
+                      {isConnecting ? 'Connecting...' : 'Connect'}
+                    </button>
+                    <button
+                      onClick={handleRefreshQr}
+                      className="px-4 py-2 rounded-xl btn-outline"
+                      disabled={!isAuthed || isConnecting}
+                    >
+                      {isConnecting ? 'Refreshing...' : 'Refresh QR'}
+                    </button>
+                  </>
+                ) : null}
                 <button
                   onClick={() => openConfirm('disconnect')}
                   className="px-4 py-2 rounded-xl btn-outline"

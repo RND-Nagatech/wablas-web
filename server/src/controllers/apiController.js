@@ -290,7 +290,14 @@ exports.listChats = async (req, res) => {
 exports.listChatIds = async (req, res) => {
   const userId = new mongoose.Types.ObjectId(req.apiUser._id);
   const rows = await Chat.find({ userId }).sort({ updatedAt: -1 }).lean();
-  const data = rows.map((c) => ({
+  // Only return "sendable" IDs for integrations: phone JIDs + group JIDs.
+  const filtered = rows.filter((c) => {
+    const id = String(c?.waChatId || '');
+    if (!id) return false;
+    if (id.endsWith('@lid')) return false;
+    return id.endsWith('@s.whatsapp.net') || id.endsWith('@g.us');
+  });
+  const data = filtered.map((c) => ({
     waChatId: c.waChatId,
     name: c.name || null,
     displayName: c.displayName || null,

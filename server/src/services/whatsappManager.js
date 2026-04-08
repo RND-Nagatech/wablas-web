@@ -23,6 +23,21 @@ class WhatsAppManager {
     this.sessions = new Map();
   }
 
+  toUnixSeconds(value) {
+    if (value === null || value === undefined) return null;
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (typeof value === 'bigint') return Number(value);
+    if (typeof value === 'string') {
+      const n = Number(value);
+      return Number.isFinite(n) ? n : null;
+    }
+    if (typeof value === 'object' && typeof value.toNumber === 'function') {
+      const n = value.toNumber();
+      return Number.isFinite(n) ? n : null;
+    }
+    return null;
+  }
+
   hasDisplayNameOverride(displayName) {
     const v = typeof displayName === 'string' ? displayName.trim() : displayName;
     return !!v;
@@ -40,6 +55,89 @@ class WhatsAppManager {
       { $set: patch, $setOnInsert: { userId: id, waChatId } },
       { upsert: true }
     ).catch(() => {});
+  }
+
+  async syncChatListFromHistorySet(userId, payload) {
+    try {
+      const id = String(userId);
+      const chats = Array.isArray(payload?.chats) ? payload.chats : [];
+      const contacts = Array.isArray(payload?.contacts) ? payload.contacts : [];
+
+      // Build quick lookups for:
+      // - contact names by phone JID
+      // - lid -> phone JID mapping
+      const contactNameByJid = new Map(); // key: <phone>@s.whatsapp.net
+      const lidToJid = new Map(); // key: <lid>@lid -> <phone>@s.whatsapp.net
+      for (const c of contacts) {
+        const idOrLid = c?.id;
+        if (!idOrLid || typeof idOrLid !== 'string') continue;
+        const lid = typeof c?.lid === 'string' ? c.lid : (idOrLid.endsWith('@lid') ? idOrLid : null);
+        const jid = typeof c?.jid === 'string' ? c.jid : (idOrLid.endsWith('@s.whatsapp.net') ? idOrLid : null);
+        const name = String(c?.name || c?.notify || c?.verifiedName || '').trim();
+        if (lid && jid) lidToJid.set(lid, jid);
+        if (jid && name) contactNameByJid.set(jid, name);
+      }
+
+      const baseOps = [];
+      const nameOps = [];
+
+      for (const chat of chats) {
+        let jid = chat?.id;
+        if (!jid || typeof jid !== 'string') continue;
+        // Normalize LID chats to phone JIDs when possible so users get sendable IDs.
+        if (jid.endsWith('@lid') && lidToJid.has(jid)) {
+          jid = lidToJid.get(jid);
+        }
+
+        const isGroup = jid.endsWith('@g.us');
+        const ts = this.toUnixSeconds(chat?.conversationTimestamp || chat?.lastMessageRecvTimestamp);
+        const lastAt = ts ? new Date(ts * 1000) : null;
+
+        const baseSet = { isGroup };
+        if (lastAt) baseSet.lastAt = lastAt;
+
+        baseOps.push({
+          updateOne: {
+            filter: { userId: id, waChatId: jid },
+            update: { $set: baseSet, $setOnInsert: { userId: id, waChatId: jid } },
+            upsert: true
+          }
+        });
+
+        // Best-effort name:
+        // - groups: subject/name (if present)
+        // - contacts: contact display name from the contacts list (if present)
+        let name = '';
+        if (isGroup) {
+          name = String(chat?.name || chat?.subject || '').trim();
+        } else {
+          name = String(contactNameByJid.get(jid) || chat?.name || '').trim();
+        }
+
+        if (name) {
+          nameOps.push({
+            updateOne: {
+              filter: {
+                userId: id,
+                waChatId: jid,
+                $or: [{ displayName: { $exists: false } }, { displayName: null }, { displayName: '' }]
+              },
+              update: { $set: { name, isGroup }, $setOnInsert: { userId: id, waChatId: jid } },
+              upsert: true
+            }
+          });
+        }
+      }
+
+      if (baseOps.length) {
+        await Chat.bulkWrite(baseOps, { ordered: false }).catch(() => {});
+      }
+      if (nameOps.length) {
+        await Chat.bulkWrite(nameOps, { ordered: false }).catch(() => {});
+      }
+    } catch {
+      // ignore
+    }
   }
 
   pickBestUserJid(msg) {
@@ -239,7 +337,10 @@ class WhatsAppManager {
       browser: Browsers.macOS('Desktop'),
       version: cachedWaWebVersion,
       printQRInTerminal: false,
-      syncFullHistory: false,
+      // Needed to reliably receive the full chat list (DMs + groups) for first-time sync.
+      // We still do NOT persist full message history; we only consume chats/contacts from events.
+      syncFullHistory: true,
+      fireInitQueries: true,
       markOnlineOnConnect: false
     });
 
@@ -247,6 +348,48 @@ class WhatsAppManager {
     this.sessions.set(id, session);
 
     sock.ev.on('creds.update', saveCreds);
+
+    // Initial sync: chats/contacts list from WhatsApp (no message details needed for MVP list-ids).
+    sock.ev.on('messaging-history.set', (data) => {
+      // Run in background so we never block the event loop or connection flow.
+      setTimeout(() => {
+        void this.syncChatListFromHistorySet(id, data);
+      }, 0);
+    });
+
+    // Some accounts deliver chat list in incremental events rather than messaging-history.set.
+    // We'll upsert chat IDs here too (names can be filled by contacts/groups sync later).
+    sock.ev.on('chats.upsert', (chats) => {
+      const list = Array.isArray(chats) ? chats : [];
+      if (!list.length) return;
+      setTimeout(() => {
+        void this.syncChatListFromHistorySet(id, { chats: list, contacts: [] });
+      }, 0);
+    });
+
+    sock.ev.on('chats.phoneNumberShare', ({ lid, jid }) => {
+      // If we previously stored a LID chat id, normalize it to phone JID.
+      if (!lid || !jid) return;
+      setTimeout(async () => {
+        try {
+          const existing = await Chat.findOne({ userId: id, waChatId: lid }).lean();
+          if (!existing) return;
+          // Upsert the phone JID doc
+          await Chat.updateOne(
+            { userId: id, waChatId: jid },
+            {
+              $setOnInsert: { userId: id, waChatId: jid },
+              $set: { isGroup: false, lastAt: existing.lastAt || null }
+            },
+            { upsert: true }
+          ).catch(() => {});
+          // Remove the lid doc to avoid duplicates in list-ids
+          await Chat.deleteOne({ userId: id, waChatId: lid }).catch(() => {});
+        } catch {
+          // ignore
+        }
+      }, 0);
+    });
 
     // Server-side QR lifecycle: auto-refresh if QR is stale but still not connected.
     session.autoRefreshTimer = setInterval(() => {
@@ -439,10 +582,14 @@ class WhatsAppManager {
       for (const c of list) {
         const jid = c?.id;
         if (!jid || typeof jid !== 'string') continue;
-        if (!jid.endsWith('@s.whatsapp.net')) continue;
+        // Prefer phone JID if present; otherwise accept id if it's already phone JID.
+        const phoneJid = typeof c?.jid === 'string'
+          ? c.jid
+          : (jid.endsWith('@s.whatsapp.net') ? jid : null);
+        if (!phoneJid) continue;
         const name = String(c?.name || c?.notify || c?.verifiedName || '').trim();
         if (!name) continue;
-        await this.setChatNameIfNoOverride(id, jid, { name, isGroup: false });
+        await this.setChatNameIfNoOverride(id, phoneJid, { name, isGroup: false });
       }
     });
 
