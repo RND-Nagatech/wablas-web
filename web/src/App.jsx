@@ -32,9 +32,15 @@ const loadSession = () => {
   }
 };
 
+const REMEMBER_ENABLED_KEY = 'wablas.remember.enabled';
+const REMEMBER_CREDS_KEY = 'wablas.remember.creds';
+
 export default function App() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [rememberMe, setRememberMe] = useState(false);
+  const rememberHydratedRef = useRef(false);
+  const [authMode, setAuthMode] = useState('login'); // 'login' | 'register'
   const [accessToken, setAccessToken] = useState('');
   const [refreshToken, setRefreshToken] = useState('');
   const [user, setUser] = useState(null);
@@ -102,6 +108,42 @@ export default function App() {
     const saved = localStorage.getItem('wablas.theme');
     if (saved) setTheme(saved);
   }, []);
+
+  useEffect(() => {
+    // Restore remembered credentials for the login form (if enabled).
+    try {
+      const enabled = localStorage.getItem(REMEMBER_ENABLED_KEY) === '1';
+      setRememberMe(enabled);
+      if (!enabled) return;
+      const raw = localStorage.getItem(REMEMBER_CREDS_KEY) || '';
+      const creds = raw ? JSON.parse(raw) : null;
+      if (creds?.email) setEmail(String(creds.email));
+      if (creds?.password) setPassword(String(creds.password));
+    } catch {
+      // ignore
+    } finally {
+      rememberHydratedRef.current = true;
+    }
+  }, []);
+
+  useEffect(() => {
+    // Persist (or clear) remembered credentials whenever the user edits the form.
+    if (!rememberHydratedRef.current) return;
+    try {
+      if (rememberMe) {
+        localStorage.setItem(REMEMBER_ENABLED_KEY, '1');
+        localStorage.setItem(
+          REMEMBER_CREDS_KEY,
+          JSON.stringify({ email: String(email || ''), password: String(password || '') })
+        );
+      } else {
+        localStorage.setItem(REMEMBER_ENABLED_KEY, '0');
+        localStorage.removeItem(REMEMBER_CREDS_KEY);
+      }
+    } catch {
+      // ignore
+    }
+  }, [rememberMe, email, password]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -413,6 +455,11 @@ export default function App() {
     setApiKey(session.apiKey);
     setSessionEmail(session.email);
     setUser(res.data.user);
+  };
+
+  const switchAuthMode = (mode) => {
+    setAuthError('');
+    setAuthMode(mode);
   };
 
   const handleConnect = async () => {
@@ -774,50 +821,130 @@ export default function App() {
 
   if (!isAuthed) {
     return (
-      <div className="min-h-screen flex items-center justify-center px-6">
-        <div className="card p-8 w-full max-w-lg space-y-6">
-          <div className="flex items-center gap-3">
-            <div className="logo">W</div>
-            <div>
-              <p className="label text-lg">Nagatech Wablas</p>
-              <p className="muted text-sm">Silakan login untuk melanjutkan</p>
+      <div className="auth-shell">
+        <div className="auth-card card w-full">
+          <div className="auth-split">
+            <div className="auth-left">
+              <div className="auth-left-inner">
+              </div>
             </div>
-          </div>
-          <div className="space-y-4">
-            <div>
-              <label className="text-sm muted">Email</label>
-              <input
-                className="mt-1 w-full rounded-xl border px-4 py-2"
-                style={{ borderColor: 'var(--border)', background: 'var(--surface-elevated)' }}
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="you@company.com"
-              />
-            </div>
-            <div>
-              <label className="text-sm muted">Password</label>
-              <input
-                type="password"
-                className="mt-1 w-full rounded-xl border px-4 py-2"
-                style={{ borderColor: 'var(--border)', background: 'var(--surface-elevated)' }}
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-              />
-            </div>
-            {authError && <p className="text-red-500 text-sm">{authError}</p>}
-            <div className="flex gap-3">
-              <button
-                onClick={() => handleAuth('login')}
-                className="px-4 py-2 rounded-xl btn-primary font-semibold"
-              >
-                Login
-              </button>
-              <button
-                onClick={() => handleAuth('register')}
-                className="px-4 py-2 rounded-xl btn-outline"
-              >
-                Register
-              </button>
+
+            <div className="auth-right">
+              <div className="auth-right-inner space-y-5">
+                <div className="space-y-3">
+                  <div className="auth-right-brand">
+                    <div className="auth-right-brandicon" aria-hidden="true">
+                      <svg viewBox="0 0 24 24" fill="none">
+                        <path
+                          d="M7.5 18.5 5 20.5v-3.1a8 8 0 1 1 2.5 1.1Z"
+                          stroke="currentColor"
+                          strokeWidth="1.9"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                    </div>
+                    <p className="auth-right-brandname">Nagatech Wablas</p>
+                  </div>
+
+                  <div className="space-y-1">
+                    <p className="auth-greet">
+                      {authMode === 'register' ? 'Buat Akun' : 'Selamat Datang'}
+                      {authMode === 'register' ? '' : ' 👋'}
+                    </p>
+                    <p className="auth-subline muted">
+                      {authMode === 'register'
+                        ? 'Lengkapi email dan password untuk membuat akun.'
+                        : 'Masukkan kredensial Anda untuk melanjutkan.'}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="space-y-4">
+                  <div>
+                    <label className="text-sm muted">Email</label>
+                    <div className="auth-field">
+                      <span className="auth-field-ico" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none">
+                          <path d="M4 7.5c0-.8.7-1.5 1.5-1.5h13c.8 0 1.5.7 1.5 1.5v9c0 .8-.7 1.5-1.5 1.5h-13C4.7 18 4 17.3 4 16.5v-9Z" stroke="currentColor" strokeWidth="1.7" />
+                          <path d="M5.5 8.2 12 12.6l6.5-4.4" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                      </span>
+                      <input
+                        type="email"
+                        autoComplete="email"
+                        className="auth-input auth-input-ico w-full rounded-xl border px-4 py-2"
+                        value={email}
+                        onChange={(e) => setEmail(e.target.value)}
+                        placeholder="you@company.com"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-sm muted">Password</label>
+                    <div className="auth-field">
+                      <span className="auth-field-ico" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none">
+                          <path d="M7.5 10.5V8.7A4.5 4.5 0 0 1 12 4.2a4.5 4.5 0 0 1 4.5 4.5v1.8" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+                          <path d="M6.5 10.5h11c.8 0 1.5.7 1.5 1.5v6c0 .8-.7 1.5-1.5 1.5h-11c-.8 0-1.5-.7-1.5-1.5v-6c0-.8.7-1.5 1.5-1.5Z" stroke="currentColor" strokeWidth="1.7" />
+                          <path d="M12 14v2" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+                        </svg>
+                      </span>
+                      <input
+                        type="password"
+                        autoComplete="current-password"
+                        className="auth-input auth-input-ico w-full rounded-xl border px-4 py-2"
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        placeholder="••••••••"
+                      />
+                    </div>
+                  </div>
+
+                  {authMode === 'login' ? (
+                    <div className="auth-remember">
+                      <label className="flex items-center gap-2 text-sm muted" style={{ userSelect: 'none' }}>
+                      <input
+                        type="checkbox"
+                        checked={rememberMe}
+                        onChange={(e) => setRememberMe(e.target.checked)}
+                      />
+                      Ingat akun ini
+                    </label>
+                    <span className="text-xs muted">Jangan aktifkan di komputer umum</span>
+                  </div>
+                  ) : null}
+
+                  {authError && <p className="text-red-500 text-sm">{authError}</p>}
+
+                  <button
+                    onClick={() => handleAuth(authMode)}
+                    className="btn-primary font-semibold auth-btn-main"
+                    type="button"
+                  >
+                    <span>{authMode === 'register' ? 'Register' : 'Login'}</span>
+                  </button>
+
+                  <p className="text-sm muted auth-register">
+                    {authMode === 'register' ? (
+                      <>
+                        Sudah punya akun?{' '}
+                        <button type="button" className="link-btn" onClick={() => switchAuthMode('login')}>
+                          Login
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        Belum punya akun?{' '}
+                        <button type="button" className="link-btn" onClick={() => switchAuthMode('register')}>
+                          Register
+                        </button>
+                      </>
+                    )}
+                  </p>
+                </div>
+              </div>
             </div>
           </div>
         </div>
