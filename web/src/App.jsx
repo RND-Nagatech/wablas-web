@@ -6,6 +6,7 @@ import {
   authRefresh,
   authRegister,
   chatHistory,
+  getStats,
   listChats,
   listIds,
   sendMedia,
@@ -57,6 +58,7 @@ export default function App() {
   const [chats, setChats] = useState([]);
   const [selectedChat, setSelectedChat] = useState('');
   const [messages, setMessages] = useState([]);
+  const [stats, setStats] = useState({ totalChats: 0, totalMessages: 0 });
   const [mediaFetchError, setMediaFetchError] = useState({}); // { [messageId]: string }
   const [mediaLoading, setMediaLoading] = useState({}); // { [messageId]: boolean }
   const [previewOpen, setPreviewOpen] = useState(false);
@@ -208,6 +210,13 @@ export default function App() {
           setIsConnecting(false);
           setConnectNotice('');
         }
+        if (res.data?.waStatus === 'connected') {
+          // Clear stale QR without requiring a full page reload.
+          setQr('');
+          setQrCreatedAt(null);
+          setIsConnecting(false);
+          setConnectNotice('');
+        }
         if (res.data?.waQrCreatedAt) {
           setQrCreatedAt(res.data.waQrCreatedAt);
         }
@@ -225,6 +234,10 @@ export default function App() {
         setQrCreatedAt(qrRes.data.waQrCreatedAt || null);
         setIsConnecting(false);
         setConnectNotice('');
+      } else {
+        // If QR is not available (404), clear any previously cached QR.
+        setQr('');
+        setQrCreatedAt(null);
       }
     };
     fetchStatus();
@@ -288,6 +301,33 @@ export default function App() {
         });
       } catch (err) {
         // ignore aborts & transient network errors
+      }
+    };
+
+    void tick();
+    const interval = setInterval(tick, 5000);
+    return () => {
+      disposed = true;
+      clearInterval(interval);
+      if (controller) controller.abort();
+    };
+  }, [apiKey, activeTab]);
+
+  useEffect(() => {
+    if (!apiKey || activeTab !== 'overview') return;
+    let disposed = false;
+    let controller = null;
+
+    const tick = async () => {
+      if (disposed) return;
+      if (controller) controller.abort();
+      controller = new AbortController();
+      try {
+        const res = await getStats(apiKey, controller.signal);
+        if (!res?.success || disposed) return;
+        setStats(res.data || { totalChats: 0, totalMessages: 0 });
+      } catch {
+        // ignore
       }
     };
 
@@ -414,10 +454,23 @@ export default function App() {
     setIsDisconnecting(true);
     setConnectNotice('Disconnecting…');
     try {
-      await waDisconnect(accessToken);
+      const res = await waDisconnect(accessToken);
+      if (!res?.success) {
+        setConnectNotice(res?.message || 'Gagal disconnect');
+        return;
+      }
+      // Optimistic UI: show connect buttons immediately.
+      setWaInfo((prev) => ({ ...prev, waStatus: 'disconnected', waPhone: null, waJid: null }));
+      setQr('');
+      setQrCreatedAt(null);
+      setIsConnecting(false);
+
+      // Re-fetch status to ensure UI is consistent with server.
+      const st = await waStatus(accessToken);
+      if (st?.success) setWaInfo(st.data);
     } finally {
       setIsDisconnecting(false);
-      setConnectNotice('');
+      setTimeout(() => setConnectNotice(''), 500);
     }
   };
 
@@ -429,10 +482,17 @@ export default function App() {
     setQrCreatedAt(null);
     setIsConnecting(false);
     try {
-      await waReset(accessToken);
+      const res = await waReset(accessToken);
+      if (!res?.success) {
+        setConnectNotice(res?.message || 'Gagal reset session');
+        return;
+      }
+      setWaInfo((prev) => ({ ...prev, waStatus: 'disconnected', waPhone: null, waJid: null }));
+      const st = await waStatus(accessToken);
+      if (st?.success) setWaInfo(st.data);
     } finally {
       setIsResettingWa(false);
-      setConnectNotice('');
+      setTimeout(() => setConnectNotice(''), 500);
     }
   };
 
@@ -806,14 +866,7 @@ export default function App() {
             Settings
           </button>
         </nav>
-        <div className="sidebar-footer">
-          <button
-            onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
-            className="btn-outline w-full"
-          >
-            {theme === 'dark' ? 'Light mode' : 'Dark mode'}
-          </button>
-        </div>
+        <div className="sidebar-footer" />
       </aside>
 
       <div className="content">
@@ -946,13 +999,13 @@ export default function App() {
             </div>
             <div className="stat-card">
               <p className="muted text-xs">Total Chats</p>
-              <p className="text-lg font-semibold">{chats.length}</p>
+              <p className="text-lg font-semibold">{stats.totalChats ?? chats.length}</p>
               <p className="muted text-xs">Synced from WA</p>
             </div>
             <div className="stat-card">
-              <p className="muted text-xs">Messages Loaded</p>
-              <p className="text-lg font-semibold">{messages.length}</p>
-              <p className="muted text-xs">Latest activity</p>
+              <p className="muted text-xs">Total Messages</p>
+              <p className="text-lg font-semibold">{stats.totalMessages ?? 0}</p>
+              <p className="muted text-xs">Stored in database</p>
             </div>
           </section>
         )}
@@ -1296,6 +1349,20 @@ export default function App() {
                 <p className="text-sm">Email: {user?.email || sessionEmail}</p>
                 <p className="muted text-sm">Status: {waInfo.waStatus}</p>
               </div>
+              <div className="pt-4 border-t" style={{ borderColor: 'var(--border)' }}>
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <p className="text-sm font-semibold">Theme</p>
+                    <p className="text-xs muted">Pilih Light/Dark mode.</p>
+                  </div>
+                  <button
+                    onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+                    className="px-4 py-2 rounded-xl btn-outline"
+                  >
+                    {theme === 'dark' ? 'Light mode' : 'Dark mode'}
+                  </button>
+                </div>
+              </div>
             </div>
 
             <div className="card p-6 space-y-5">
@@ -1310,45 +1377,49 @@ export default function App() {
                     <button
                       onClick={handleConnect}
                       className="px-4 py-2 rounded-xl btn-primary font-semibold"
-                      disabled={!isAuthed || isConnecting}
+                      disabled={!isAuthed || isConnecting || isDisconnecting || isResettingWa}
                     >
                       {isConnecting ? 'Connecting...' : 'Connect'}
                     </button>
                     <button
                       onClick={handleRefreshQr}
                       className="px-4 py-2 rounded-xl btn-outline"
-                      disabled={!isAuthed || isConnecting}
+                      disabled={!isAuthed || isConnecting || isDisconnecting || isResettingWa}
                     >
                       {isConnecting ? 'Refreshing...' : 'Refresh QR'}
                     </button>
                   </>
                 ) : null}
-                <button
-                  onClick={() => openConfirm('disconnect')}
-                  className="px-4 py-2 rounded-xl btn-outline"
-                  disabled={!isAuthed || isDisconnecting || isResettingWa}
-                >
-                  {isDisconnecting ? (
-                    <span className="btn-inline">
-                      <span className="spinner" /> Disconnecting…
-                    </span>
-                  ) : (
-                    'Disconnect'
-                  )}
-                </button>
-                <button
-                  onClick={() => openConfirm('reset')}
-                  className="px-4 py-2 rounded-xl btn-outline"
-                  disabled={!isAuthed || isResettingWa || isDisconnecting}
-                >
-                  {isResettingWa ? (
-                    <span className="btn-inline">
-                      <span className="spinner" /> Resetting…
-                    </span>
-                  ) : (
-                    'Reset Session'
-                  )}
-                </button>
+                {waInfo.waStatus === 'connected' ? (
+                  <>
+                    <button
+                      onClick={() => openConfirm('disconnect')}
+                      className="px-4 py-2 rounded-xl btn-outline"
+                      disabled={!isAuthed || isDisconnecting || isResettingWa}
+                    >
+                      {isDisconnecting ? (
+                        <span className="btn-inline">
+                          <span className="spinner" /> Disconnecting…
+                        </span>
+                      ) : (
+                        'Disconnect'
+                      )}
+                    </button>
+                    <button
+                      onClick={() => openConfirm('reset')}
+                      className="px-4 py-2 rounded-xl btn-outline"
+                      disabled={!isAuthed || isResettingWa || isDisconnecting}
+                    >
+                      {isResettingWa ? (
+                        <span className="btn-inline">
+                          <span className="spinner" /> Resetting…
+                        </span>
+                      ) : (
+                        'Reset Session'
+                      )}
+                    </button>
+                  </>
+                ) : null}
               </div>
               {connectNotice && <p className="text-sm muted">{connectNotice}</p>}
               {waInfo?.waLastError && (
@@ -1359,11 +1430,14 @@ export default function App() {
               {qrAgeSeconds !== null && (
                 <p className="text-sm muted">QR age: {qrAgeSeconds}s</p>
               )}
-              {qr && (
+              {waInfo.waStatus !== 'connected' && qr ? (
                 <div className="bg-white p-4 rounded-xl inline-block">
                   <img src={qr} alt="QR Code" className="w-48 h-48" />
                 </div>
-              )}
+              ) : null}
+              {waInfo.waStatus === 'connected' ? (
+                <p className="muted text-sm">Connected. QR code disembunyikan.</p>
+              ) : null}
             </div>
           </section>
         )}

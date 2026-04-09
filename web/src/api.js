@@ -120,6 +120,14 @@ export const listIds = async (apiKey, signal) => {
   return res.json();
 };
 
+export const getStats = async (apiKey, signal) => {
+  const res = await fetch(`${API_URL}/api/stats`, {
+    headers: { 'X-API-KEY': apiKey },
+    signal
+  });
+  return res.json();
+};
+
 export const chatHistory = async (apiKey, waChatId, signal) => {
   const res = await fetch(`${API_URL}/api/history/chats/${encodeURIComponent(waChatId)}`, {
     headers: { 'X-API-KEY': apiKey },

@@ -275,34 +275,76 @@ exports.listChats = async (req, res) => {
     rows = await Chat.find({ userId }).sort({ lastAt: -1, updatedAt: -1 }).lean();
   }
 
-  const data = rows.map((c) => ({
-    waChatId: c.waChatId,
-    name: c.name || null,
-    displayName: c.displayName || null,
-    isGroup: !!c.isGroup,
-    lastMessage: c.lastMessage || null,
-    lastAt: c.lastAt || null
-  }));
+  // Defensive dedupe: older DBs might contain duplicates if indexes weren't built.
+  const data = rows.reduce((acc, c) => {
+    const id = String(c?.waChatId || '');
+    if (!id) return acc;
+    if (acc._seen.has(id)) return acc;
+    acc._seen.add(id);
+    acc.items.push({
+      waChatId: c.waChatId,
+      name: c.name || null,
+      displayName: c.displayName || null,
+      isGroup: !!c.isGroup,
+      lastMessage: c.lastMessage || null,
+      lastAt: c.lastAt || null
+    });
+    return acc;
+  }, { _seen: new Set(), items: [] }).items;
 
   return res.json({ success: true, data });
 };
 
 exports.listChatIds = async (req, res) => {
   const userId = new mongoose.Types.ObjectId(req.apiUser._id);
-  const rows = await Chat.find({ userId }).sort({ updatedAt: -1 }).lean();
-  // Only return "sendable" IDs for integrations: phone JIDs + group JIDs.
-  const filtered = rows.filter((c) => {
-    const id = String(c?.waChatId || '');
-    if (!id) return false;
-    if (id.endsWith('@lid')) return false;
-    return id.endsWith('@s.whatsapp.net') || id.endsWith('@g.us');
-  });
-  const data = filtered.map((c) => ({
-    waChatId: c.waChatId,
-    name: c.name || null,
-    displayName: c.displayName || null,
-    isGroup: !!c.isGroup
-  }));
+  // Build an integration-friendly list:
+  // - expose only sendable IDs (phone JIDs + group JIDs)
+  // - if we only have a LID record, expose its resolvedJid when present
+  // - dedupe and prefer rows with displayName/name filled
+  const rows = await Chat.find({ userId })
+    .select({ waChatId: 1, name: 1, displayName: 1, isGroup: 1, resolvedJid: 1, lastAt: 1, updatedAt: 1 })
+    .sort({ updatedAt: -1 })
+    .lean();
+  const bestById = new Map();
+
+  const score = (c) => {
+    const dn = String(c?.displayName || '').trim();
+    const n = String(c?.name || '').trim();
+    let s = 0;
+    if (dn) s += 4;
+    if (n) s += 2;
+    if (c?.lastAt) s += 1;
+    return s;
+  };
+
+  for (const c of rows) {
+    const rawId = String(c?.waChatId || '');
+    if (!rawId) continue;
+
+    let exposedId = rawId;
+    if (rawId.endsWith('@lid')) {
+      const resolved = String(c?.resolvedJid || '').trim();
+      if (!resolved) continue; // hide unresolved lid
+      exposedId = resolved;
+    }
+
+    // Only return "sendable" IDs for integrations: phone JIDs + group JIDs.
+    if (!(exposedId.endsWith('@s.whatsapp.net') || exposedId.endsWith('@g.us'))) continue;
+
+    const prev = bestById.get(exposedId);
+    if (!prev || score(c) > score(prev._src)) {
+      bestById.set(exposedId, { _src: c });
+    }
+  }
+
+  const data = Array.from(bestById.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([waChatId, wrap]) => ({
+      waChatId,
+      name: wrap._src?.name || null,
+      displayName: wrap._src?.displayName || null,
+      isGroup: waChatId.endsWith('@g.us')
+    }));
   return res.json({ success: true, data });
 };
 
@@ -336,6 +378,19 @@ exports.setChatDisplayName = async (req, res) => {
     return res.json({ success: true, data: updated });
   } catch (err) {
     return res.status(500).json({ success: false, message: 'Gagal update displayName' });
+  }
+};
+
+exports.stats = async (req, res) => {
+  try {
+    const userId = req.apiUser._id;
+    const [totalChats, totalMessages] = await Promise.all([
+      Chat.countDocuments({ userId }),
+      Message.countDocuments({ userId })
+    ]);
+    return res.json({ success: true, data: { totalChats, totalMessages } });
+  } catch {
+    return res.status(500).json({ success: false, message: 'Gagal mengambil statistik' });
   }
 };
 

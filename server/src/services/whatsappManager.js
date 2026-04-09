@@ -23,6 +23,24 @@ class WhatsAppManager {
     this.sessions = new Map();
   }
 
+  normalizeLidId(value) {
+    const s = String(value || '').trim();
+    if (!s) return null;
+    if (s.includes('@')) return s;
+    // Some events provide bare numeric LIDs
+    return `${s}@lid`;
+  }
+
+  normalizePhoneJid(value) {
+    const s = String(value || '').trim();
+    if (!s) return null;
+    if (s.includes('@')) return s;
+    // Some events provide bare numeric phone IDs
+    const digits = s.replace(/[^\d]/g, '');
+    if (!digits) return null;
+    return `${digits}@s.whatsapp.net`;
+  }
+
   toUnixSeconds(value) {
     if (value === null || value === undefined) return null;
     if (typeof value === 'number' && Number.isFinite(value)) return value;
@@ -67,27 +85,40 @@ class WhatsAppManager {
       // - contact names by phone JID
       // - lid -> phone JID mapping
       const contactNameByJid = new Map(); // key: <phone>@s.whatsapp.net
+      const contactNameByLid = new Map(); // key: <lid>@lid
       const lidToJid = new Map(); // key: <lid>@lid -> <phone>@s.whatsapp.net
       for (const c of contacts) {
         const idOrLid = c?.id;
         if (!idOrLid || typeof idOrLid !== 'string') continue;
-        const lid = typeof c?.lid === 'string' ? c.lid : (idOrLid.endsWith('@lid') ? idOrLid : null);
-        const jid = typeof c?.jid === 'string' ? c.jid : (idOrLid.endsWith('@s.whatsapp.net') ? idOrLid : null);
+        const lidRaw =
+          typeof c?.lid === 'string'
+            ? c.lid
+            : (idOrLid.endsWith('@lid') || !idOrLid.includes('@') ? idOrLid : null);
+        const jidRaw =
+          typeof c?.jid === 'string'
+            ? c.jid
+            : (idOrLid.endsWith('@s.whatsapp.net') || !idOrLid.includes('@') ? idOrLid : null);
+
+        const lid = lidRaw ? this.normalizeLidId(lidRaw) : null;
+        const jid = jidRaw ? this.normalizePhoneJid(jidRaw) : null;
         const name = String(c?.name || c?.notify || c?.verifiedName || '').trim();
         if (lid && jid) lidToJid.set(lid, jid);
         if (jid && name) contactNameByJid.set(jid, name);
+        if (lid && name) contactNameByLid.set(lid, name);
       }
 
       const baseOps = [];
       const nameOps = [];
 
       for (const chat of chats) {
-        let jid = chat?.id;
-        if (!jid || typeof jid !== 'string') continue;
+        const rawId0 = chat?.id;
+        if (!rawId0 || typeof rawId0 !== 'string') continue;
+        // Normalize bare ids to phone JIDs to keep list-ids usable.
+        const rawId = rawId0.includes('@') ? rawId0 : (this.normalizePhoneJid(rawId0) || rawId0);
+
         // Normalize LID chats to phone JIDs when possible so users get sendable IDs.
-        if (jid.endsWith('@lid') && lidToJid.has(jid)) {
-          jid = lidToJid.get(jid);
-        }
+        const resolved = rawId.endsWith('@lid') ? (lidToJid.get(this.normalizeLidId(rawId) || rawId) || null) : null;
+        const jid = resolved || rawId;
 
         const isGroup = jid.endsWith('@g.us');
         const ts = this.toUnixSeconds(chat?.conversationTimestamp || chat?.lastMessageRecvTimestamp);
@@ -95,6 +126,7 @@ class WhatsAppManager {
 
         const baseSet = { isGroup };
         if (lastAt) baseSet.lastAt = lastAt;
+        if (resolved) baseSet.resolvedJid = resolved;
 
         baseOps.push({
           updateOne: {
@@ -104,6 +136,20 @@ class WhatsAppManager {
           }
         });
 
+        // If it was a LID, also keep/update the LID record so we can preserve names until resolved.
+        if (rawId.endsWith('@lid')) {
+          const lidSet = { isGroup: false };
+          if (lastAt) lidSet.lastAt = lastAt;
+          if (resolved) lidSet.resolvedJid = resolved;
+          baseOps.push({
+            updateOne: {
+              filter: { userId: id, waChatId: rawId },
+              update: { $set: lidSet, $setOnInsert: { userId: id, waChatId: rawId } },
+              upsert: true
+            }
+          });
+        }
+
         // Best-effort name:
         // - groups: subject/name (if present)
         // - contacts: contact display name from the contacts list (if present)
@@ -111,7 +157,11 @@ class WhatsAppManager {
         if (isGroup) {
           name = String(chat?.name || chat?.subject || '').trim();
         } else {
-          name = String(contactNameByJid.get(jid) || chat?.name || '').trim();
+          if (rawId.endsWith('@lid') && !resolved) {
+            name = String(contactNameByLid.get(rawId) || chat?.name || '').trim();
+          } else {
+            name = String(contactNameByJid.get(jid) || chat?.name || '').trim();
+          }
         }
 
         if (name) {
@@ -119,13 +169,32 @@ class WhatsAppManager {
             updateOne: {
               filter: {
                 userId: id,
-                waChatId: jid,
+                waChatId: rawId.endsWith('@lid') && !resolved ? rawId : jid,
                 $or: [{ displayName: { $exists: false } }, { displayName: null }, { displayName: '' }]
               },
-              update: { $set: { name, isGroup }, $setOnInsert: { userId: id, waChatId: jid } },
+              update: { $set: { name, isGroup }, $setOnInsert: { userId: id, waChatId: rawId.endsWith('@lid') && !resolved ? rawId : jid } },
               upsert: true
             }
           });
+        }
+
+        // If the chat came as a LID, preserve the name on the LID record too.
+        if (rawId.endsWith('@lid')) {
+          const lidKey = this.normalizeLidId(rawId) || rawId;
+          const lidName = String(contactNameByLid.get(lidKey) || '').trim();
+          if (lidName) {
+            nameOps.push({
+              updateOne: {
+                filter: {
+                  userId: id,
+                  waChatId: lidKey,
+                  $or: [{ displayName: { $exists: false } }, { displayName: null }, { displayName: '' }]
+                },
+                update: { $set: { name: lidName, isGroup: false }, $setOnInsert: { userId: id, waChatId: lidKey } },
+                upsert: true
+              }
+            });
+          }
         }
       }
 
@@ -298,6 +367,10 @@ class WhatsAppManager {
       cachedWaWebVersion = version;
     }
 
+    // Always do full history sync on connect for this MVP.
+    // This keeps behavior simple and ensures chat list (DM + groups) is populated after reconnect.
+    const needFullHistory = true;
+
     const session = {
       status: 'connecting',
       qr: null,
@@ -339,7 +412,7 @@ class WhatsAppManager {
       printQRInTerminal: false,
       // Needed to reliably receive the full chat list (DMs + groups) for first-time sync.
       // We still do NOT persist full message history; we only consume chats/contacts from events.
-      syncFullHistory: true,
+      syncFullHistory: needFullHistory,
       fireInitQueries: true,
       markOnlineOnConnect: false
     });
@@ -372,19 +445,47 @@ class WhatsAppManager {
       if (!lid || !jid) return;
       setTimeout(async () => {
         try {
-          const existing = await Chat.findOne({ userId: id, waChatId: lid }).lean();
+          const lidNorm = this.normalizeLidId(lid) || String(lid);
+          const jidNorm = this.normalizePhoneJid(jid) || String(jid);
+
+          const existing = await Chat.findOne({ userId: id, waChatId: { $in: [lidNorm, String(lid)] } }).lean();
           if (!existing) return;
-          // Upsert the phone JID doc
+
+          // Mark the LID record as resolved (we keep it, but it will be hidden from list-ids).
           await Chat.updateOne(
-            { userId: id, waChatId: jid },
+            { userId: id, waChatId: existing.waChatId },
+            { $set: { resolvedJid: jidNorm } }
+          ).catch(() => {});
+
+          // Ensure phone JID exists and carry over fields from the LID doc (name/override).
+          await Chat.updateOne(
+            { userId: id, waChatId: jidNorm },
             {
-              $setOnInsert: { userId: id, waChatId: jid },
-              $set: { isGroup: false, lastAt: existing.lastAt || null }
+              $setOnInsert: { userId: id, waChatId: jidNorm },
+              $set: {
+                isGroup: false,
+                lastAt: existing.lastAt || null,
+                lastMessage: existing.lastMessage || null
+              }
             },
             { upsert: true }
           ).catch(() => {});
-          // Remove the lid doc to avoid duplicates in list-ids
-          await Chat.deleteOne({ userId: id, waChatId: lid }).catch(() => {});
+
+          // Carry over name/displayName if present.
+          if (existing.name) {
+            await this.setChatNameIfNoOverride(id, jidNorm, { name: existing.name, isGroup: false });
+          }
+          if (existing.displayName) {
+            await Chat.updateOne(
+              {
+                userId: id,
+                waChatId: jidNorm,
+                $or: [{ displayName: { $exists: false } }, { displayName: null }, { displayName: '' }]
+              },
+              { $set: { displayName: String(existing.displayName).trim() } }
+            ).catch(() => {});
+          }
+
         } catch {
           // ignore
         }
@@ -583,13 +684,25 @@ class WhatsAppManager {
         const jid = c?.id;
         if (!jid || typeof jid !== 'string') continue;
         // Prefer phone JID if present; otherwise accept id if it's already phone JID.
-        const phoneJid = typeof c?.jid === 'string'
-          ? c.jid
-          : (jid.endsWith('@s.whatsapp.net') ? jid : null);
+        const phoneJidRaw = typeof c?.jid === 'string' ? c.jid : (jid.endsWith('@s.whatsapp.net') ? jid : null);
+        const phoneJid = phoneJidRaw ? (this.normalizePhoneJid(phoneJidRaw) || phoneJidRaw) : null;
         if (!phoneJid) continue;
         const name = String(c?.name || c?.notify || c?.verifiedName || '').trim();
         if (!name) continue;
         await this.setChatNameIfNoOverride(id, phoneJid, { name, isGroup: false });
+
+        // If this contact also has a LID id, store the mapping to help list-ids expose phone JIDs.
+        const lidRaw = typeof c?.lid === 'string' ? c.lid : (jid.endsWith('@lid') ? jid : null);
+        const lidNorm = lidRaw ? this.normalizeLidId(lidRaw) : null;
+        if (lidNorm && lidNorm.endsWith('@lid')) {
+          await Chat.updateOne(
+            { userId: id, waChatId: lidNorm },
+            { $set: { resolvedJid: phoneJid, isGroup: false }, $setOnInsert: { userId: id, waChatId: lidNorm } },
+            { upsert: true }
+          ).catch(() => {});
+          // If the LID doc had a name earlier, keep it there too.
+          await this.setChatNameIfNoOverride(id, lidNorm, { name, isGroup: false });
+        }
       }
     });
 
