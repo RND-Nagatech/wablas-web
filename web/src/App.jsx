@@ -223,6 +223,7 @@ export default function App() {
 
   const handleLogout = () => {
     localStorage.removeItem('wablas.session');
+    setShowAccountMenu(false);
     setAccessToken('');
     setRefreshToken('');
     setApiKey('');
@@ -443,6 +444,7 @@ export default function App() {
       setAuthError(res.message || 'Gagal login');
       return;
     }
+    setShowAccountMenu(false);
     const session = {
       accessToken: res.data.accessToken,
       refreshToken: res.data.refreshToken,
