@@ -49,6 +49,10 @@ const resolveMedia = async (mediaUrl) => {
     mediaUrl = mediaUrl.replace(baseUrl, '');
   }
 
+  if (mediaUrl.startsWith('/api/media/')) {
+    mediaUrl = mediaUrl.replace('/api/media/', '/media/');
+  }
+
   if (mediaUrl.startsWith('/media/')) {
     const id = mediaUrl.replace('/media/', '').trim();
     const objectId = new mongoose.Types.ObjectId(id);
@@ -433,7 +437,8 @@ exports.upload = async (req, res) => {
       try {
         fs.rmSync(req.file.path, { force: true });
       } catch {}
-      const url = `${baseUrl}/media/${uploadStream.id.toString()}`;
+      // Use /api/media/* so it works behind nginx when only /api is proxied.
+      const url = `${baseUrl}/api/media/${uploadStream.id.toString()}`;
       return res.json({ success: true, data: { media_url: url, media_id: uploadStream.id.toString() } });
     });
 };

@@ -8,7 +8,7 @@ const jsonHeaders = (token) => ({
 });
 
 export const authRegister = async (email, password) => {
-  const res = await fetch(`${API_URL}/auth/register`, {
+  const res = await fetch(`${API_URL}/api/auth/register`, {
     method: 'POST',
     headers: jsonHeaders(),
     body: JSON.stringify({ email, password })
@@ -17,7 +17,7 @@ export const authRegister = async (email, password) => {
 };
 
 export const authLogin = async (email, password) => {
-  const res = await fetch(`${API_URL}/auth/login`, {
+  const res = await fetch(`${API_URL}/api/auth/login`, {
     method: 'POST',
     headers: jsonHeaders(),
     body: JSON.stringify({ email, password })
@@ -26,7 +26,7 @@ export const authLogin = async (email, password) => {
 };
 
 export const authRefresh = async (refreshToken) => {
-  const res = await fetch(`${API_URL}/auth/refresh`, {
+  const res = await fetch(`${API_URL}/api/auth/refresh`, {
     method: 'POST',
     headers: jsonHeaders(),
     body: JSON.stringify({ refreshToken })
@@ -35,21 +35,21 @@ export const authRefresh = async (refreshToken) => {
 };
 
 export const authMe = async (accessToken) => {
-  const res = await fetch(`${API_URL}/auth/me`, {
+  const res = await fetch(`${API_URL}/api/auth/me`, {
     headers: jsonHeaders(accessToken)
   });
   return res.json();
 };
 
 export const waStatus = async (accessToken) => {
-  const res = await fetch(`${API_URL}/wa/status`, {
+  const res = await fetch(`${API_URL}/api/wa/status`, {
     headers: jsonHeaders(accessToken)
   });
   return res.json();
 };
 
 export const waConnect = async (accessToken, force = false) => {
-  const url = force ? `${API_URL}/wa/connect?force=1` : `${API_URL}/wa/connect`;
+  const url = force ? `${API_URL}/api/wa/connect?force=1` : `${API_URL}/api/wa/connect`;
   const res = await fetch(url, {
     method: 'POST',
     headers: jsonHeaders(accessToken)
@@ -58,14 +58,14 @@ export const waConnect = async (accessToken, force = false) => {
 };
 
 export const waQr = async (accessToken) => {
-  const res = await fetch(`${API_URL}/wa/qr`, {
+  const res = await fetch(`${API_URL}/api/wa/qr`, {
     headers: jsonHeaders(accessToken)
   });
   return res.json();
 };
 
 export const waDisconnect = async (accessToken) => {
-  const res = await fetch(`${API_URL}/wa/disconnect`, {
+  const res = await fetch(`${API_URL}/api/wa/disconnect`, {
     method: 'POST',
     headers: jsonHeaders(accessToken)
   });
@@ -73,7 +73,7 @@ export const waDisconnect = async (accessToken) => {
 };
 
 export const waReset = async (accessToken) => {
-  const res = await fetch(`${API_URL}/wa/reset`, {
+  const res = await fetch(`${API_URL}/api/wa/reset`, {
     method: 'POST',
     headers: jsonHeaders(accessToken)
   });

@@ -25,14 +25,27 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// Media is stored in MongoDB GridFS and served via /media/:id
+// Media is stored in MongoDB GridFS and served via /api/media/:id (nginx only proxies /api/* in prod)
+// Keep /media/:id for backward compatibility / local dev.
+app.get('/api/media/:id', authJwt, mediaController.getMedia);
 app.get('/media/:id', authJwt, mediaController.getMedia);
 
+// JWT routes (mount under /api/* so nginx can proxy only /api/)
+app.use('/api/auth', authRoutes);
+app.use('/api/wa', waRoutes);
+
+// Backward compatibility / local dev (optional)
 app.use('/auth', authRoutes);
 app.use('/wa', waRoutes);
+
 app.use('/api', apiRoutes);
 
 app.get('/health', (req, res) => {
+  res.json({ success: true, status: 'ok' });
+});
+
+// Prod convenience when only /api is proxied
+app.get('/api/health', (req, res) => {
   res.json({ success: true, status: 'ok' });
 });
 

@@ -731,15 +731,20 @@ export default function App() {
 
   const getMediaIdFromUrl = (url) => {
     const s = String(url || '');
-    const idx = s.lastIndexOf('/media/');
+    // Accept both legacy (/media/:id) and proxied (/api/media/:id)
+    const idxApi = s.lastIndexOf('/api/media/');
+    const idxLegacy = s.lastIndexOf('/media/');
+    const idx = idxApi !== -1 ? idxApi : idxLegacy;
     if (idx === -1) return null;
-    const tail = s.slice(idx + '/media/'.length);
+    const prefix = idxApi !== -1 ? '/api/media/' : '/media/';
+    const tail = s.slice(idx + prefix.length);
     const id = tail.split(/[?#/]/)[0];
     return id || null;
   };
 
   const fetchMediaBlob = async (mediaId) => {
-    const res = await fetch(`${apiUrl}/media/${encodeURIComponent(mediaId)}`, {
+    // In production, nginx proxies only /api/*, so we fetch via /api/media/:id
+    const res = await fetch(`${apiUrl}/api/media/${encodeURIComponent(mediaId)}`, {
       headers: { Authorization: `Bearer ${accessToken}` }
     });
     if (!res.ok) {
